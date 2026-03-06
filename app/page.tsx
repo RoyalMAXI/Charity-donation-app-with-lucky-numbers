@@ -1,7 +1,9 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
+import { LuckyNumberDisplay } from "./components/LuckyNumberDisplay"
 
 type CharityId = "children" | "animal" | "water" | "climate"
 
@@ -13,9 +15,13 @@ const CHARITIES: { id: CharityId; label: string; icon: string; tagline: string }
 ]
 
 export default function LotteryLanding() {
-  const [isAnimating, setIsAnimating] = useState(false)
+  const router = useRouter()
+  const searchParams = useSearchParams()
+
+  const [isCheckingOut, setIsCheckingOut] = useState(false)
   const [luckyNumbers, setLuckyNumbers] = useState<number[]>([])
   const [showNumbers, setShowNumbers] = useState(false)
+  const [paymentStatus, setPaymentStatus] = useState<"idle" | "success" | "error">("idle")
   const [selectedCharity, setSelectedCharity] = useState<CharityId>("children")
   const [charityTotals, setCharityTotals] = useState<Record<CharityId, number>>({
     children: 0,
@@ -23,25 +29,96 @@ export default function LotteryLanding() {
     water: 0,
     climate: 0,
   })
+  const [amountInput, setAmountInput] = useState("1.00")
+  const [amountError, setAmountError] = useState<string | null>(null)
+
+  const parsedAmount = useMemo(() => {
+    const value = parseFloat(amountInput.replace(",", "."))
+    return Number.isFinite(value) ? value : NaN
+  }, [amountInput])
+
+  const isAmountValid = !Number.isNaN(parsedAmount) && parsedAmount >= 1
 
   const totalRaised = Object.values(charityTotals).reduce((sum, amount) => sum + amount, 0)
 
-  const handleGetNumbers = () => {
-    setIsAnimating(true)
-    setShowNumbers(false)
+  const getSelectedCharityName = () =>
+    CHARITIES.find((c) => c.id === selectedCharity)?.label ?? "Charity"
 
-    const numbers = Array.from({ length: 5 }, () => Math.floor(Math.random() * 99) + 1)
+  useEffect(() => {
+    const success = searchParams.get("success")
+    const amountParam = searchParams.get("amount")
+    const charityParam = searchParams.get("charity") as CharityId | null
 
-    setTimeout(() => {
-      const amount = 0.5
-      setCharityTotals((prev) => ({
-        ...prev,
-        [selectedCharity]: prev[selectedCharity] + amount,
-      }))
-      setLuckyNumbers(numbers)
-      setShowNumbers(true)
-      setIsAnimating(false)
-    }, 300)
+    if (success === "true" && amountParam) {
+      const paidAmount = parseFloat(amountParam)
+
+      if (!Number.isNaN(paidAmount) && paidAmount >= 1) {
+        const charity: CharityId =
+          charityParam && (["children", "animal", "water", "climate"] as const).includes(charityParam)
+            ? charityParam
+            : "children"
+
+        const numbers = Array.from({ length: 5 }, () => Math.floor(Math.random() * 99) + 1)
+
+        setCharityTotals((prev) => ({
+          ...prev,
+          [charity]: prev[charity] + paidAmount,
+        }))
+        setSelectedCharity(charity)
+        setLuckyNumbers(numbers)
+        setShowNumbers(true)
+        setPaymentStatus("success")
+        setAmountInput(paidAmount.toFixed(2))
+      } else {
+        setPaymentStatus("error")
+      }
+
+      router.replace("/", { scroll: false })
+    } else if (searchParams.get("canceled") === "true") {
+      setPaymentStatus("idle")
+    }
+  }, [router, searchParams])
+
+  const handleCheckout = async () => {
+    setAmountError(null)
+
+    if (!isAmountValid) {
+      setAmountError("Please enter at least €1.00.")
+      return
+    }
+
+    try {
+      setIsCheckingOut(true)
+      setPaymentStatus("idle")
+      setShowNumbers(false)
+
+      const amountInCents = Math.round(parsedAmount * 100)
+
+      const response = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: amountInCents, charityId: selectedCharity }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || "Unable to start checkout.")
+      }
+
+      const { url } = await response.json()
+
+      if (!url || typeof url !== "string") {
+        throw new Error("Stripe did not return a checkout URL.")
+      }
+
+      window.location.href = url
+    } catch (error: any) {
+      console.error("Checkout error:", error)
+      setPaymentStatus("error")
+      setAmountError(error?.message || "Something went wrong starting checkout.")
+    } finally {
+      setIsCheckingOut(false)
+    }
   }
 
   return (
@@ -110,40 +187,57 @@ export default function LotteryLanding() {
           </div>
         </div>
 
-        {/* Main CTA Button */}
+        {/* Amount input + Main CTA Button */}
         <div className="mb-16 flex flex-col items-center">
+          <div className="w-full max-w-xs mb-4">
+            <label className="flex items-center justify-between text-xs font-mono uppercase tracking-[0.25em] text-emerald-300/80 mb-2">
+              <span>Donation Amount</span>
+              <span className="text-[10px] text-emerald-500/80">Min €1.00</span>
+            </label>
+            <div className="relative">
+              <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-emerald-300 text-sm">
+                €
+              </div>
+              <input
+                type="number"
+                min={1}
+                step={0.5}
+                value={amountInput}
+                onChange={(e) => setAmountInput(e.target.value)}
+                className="w-full rounded-xl border border-emerald-700/70 bg-black/60 px-7 py-2 text-sm text-emerald-50 shadow-[0_0_18px_rgba(16,185,129,0.2)] focus:outline-none focus:ring-2 focus:ring-emerald-400/80 focus:border-emerald-400/80"
+              />
+            </div>
+            {amountError && (
+              <p className="mt-1 text-xs text-red-400/90 font-mono">{amountError}</p>
+            )}
+          </div>
+
           <Button
-            onClick={handleGetNumbers}
-            disabled={isAnimating}
+            onClick={handleCheckout}
+            disabled={isCheckingOut || !isAmountValid}
             size="lg"
             className="relative h-auto py-8 px-12 text-xl md:text-2xl font-bold bg-primary text-primary-foreground glow-green-intense hover:glow-green-intense hover:scale-105 transition-all duration-300 rounded-xl border-2 border-primary/50"
           >
-            <span className="relative z-10 text-balance">Get 5 Lucky Numbers for $0.50</span>
-            {isAnimating && <div className="absolute inset-0 bg-primary animate-pulse rounded-xl" />}
+            <span className="relative z-10 text-balance">
+              {isCheckingOut
+                ? "Redirecting to secure checkout..."
+                : `Get 5 Lucky Numbers for €${isAmountValid ? parsedAmount.toFixed(2) : "0.00"}`}
+            </span>
+            {isCheckingOut && (
+              <div className="absolute inset-0 bg-primary animate-pulse rounded-xl opacity-60" />
+            )}
           </Button>
 
           <p className="mt-6 text-muted-foreground text-sm md:text-base text-center max-w-md">
             {"Every purchase supports charitable causes. Your luck makes a difference."}
           </p>
 
-          {showNumbers && (
-            <div className="mt-8 flex flex-col items-center gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <p className="text-primary text-sm font-mono uppercase tracking-wider text-glow-green">
-                Your Lucky Numbers
-              </p>
-              <div className="flex items-center gap-3 md:gap-4">
-                {luckyNumbers.map((number, index) => (
-                  <div
-                    key={index}
-                    className="flex items-center justify-center w-16 h-16 md:w-20 md:h-20 rounded-full bg-gradient-to-br from-primary/90 to-primary border-2 border-primary/50 glow-green font-mono text-2xl md:text-3xl font-bold text-primary-foreground animate-in zoom-in duration-300"
-                    style={{ animationDelay: `${index * 100}ms` }}
-                  >
-                    {number}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          <LuckyNumberDisplay
+            showNumbers={showNumbers}
+            luckyNumbers={luckyNumbers}
+            paymentStatus={paymentStatus}
+            getSelectedCharityName={getSelectedCharityName}
+          />
         </div>
 
         {/* Charity Counter */}
