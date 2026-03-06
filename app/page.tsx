@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { LuckyNumberDisplay } from "./components/LuckyNumberDisplay"
@@ -21,7 +21,7 @@ const CHARITIES: { id: CharityId; label: string; icon: string; tagline: string }
   { id: "climate", label: "Climate", icon: "🌍", tagline: "Protect our planet" },
 ]
 
-export default function LotteryLanding() {
+function LotteryLandingInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
 
@@ -404,5 +404,30 @@ export default function LotteryLanding() {
         </div>
       </div>
     </div>
+  )
+}
+
+export default function Page() {
+  return (
+    <Suspense
+      fallback={
+        <div className="relative min-h-screen w-full overflow-hidden bg-background">
+          <div className="absolute inset-0 bg-[linear-gradient(to_right,#1a1a1a_1px,transparent_1px),linear-gradient(to_bottom,#1a1a1a_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_50%,#000_70%,transparent_100%)]" />
+          <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/10 rounded-full blur-[128px] animate-pulse" />
+          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-primary/10 rounded-full blur-[128px] animate-pulse [animation-delay:1s]" />
+
+          <div className="relative z-10 flex flex-col items-center justify-center min-h-screen px-4 py-12">
+            <h1 className="font-mono text-2xl md:text-3xl font-bold tracking-wider text-primary text-glow-green">
+              LUCKYDRAW
+            </h1>
+            <p className="mt-6 text-muted-foreground text-sm font-mono uppercase tracking-widest">
+              Loading…
+            </p>
+          </div>
+        </div>
+      }
+    >
+      <LotteryLandingInner />
+    </Suspense>
   )
 }
