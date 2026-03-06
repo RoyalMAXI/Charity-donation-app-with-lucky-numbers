@@ -1,11 +1,18 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { LuckyNumberDisplay } from "./components/LuckyNumberDisplay"
+import { supabase } from "@/lib/supabase"
 
 type CharityId = "children" | "animal" | "water" | "climate"
+
+type CharityRow = {
+  id: string
+  name: string
+  raised: number | null
+}
 
 const CHARITIES: { id: CharityId; label: string; icon: string; tagline: string }[] = [
   { id: "children", label: "Children", icon: "🎒", tagline: "Education & safety for kids" },
@@ -23,12 +30,9 @@ export default function LotteryLanding() {
   const [showNumbers, setShowNumbers] = useState(false)
   const [paymentStatus, setPaymentStatus] = useState<"idle" | "success" | "error">("idle")
   const [selectedCharity, setSelectedCharity] = useState<CharityId>("children")
-  const [charityTotals, setCharityTotals] = useState<Record<CharityId, number>>({
-    children: 0,
-    animal: 0,
-    water: 0,
-    climate: 0,
-  })
+  const [leaderboard, setLeaderboard] = useState<CharityRow[]>([])
+  const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false)
+  const [leaderboardError, setLeaderboardError] = useState<string | null>(null)
   const [amountInput, setAmountInput] = useState("1.00")
   const [amountError, setAmountError] = useState<string | null>(null)
 
@@ -39,31 +43,126 @@ export default function LotteryLanding() {
 
   const isAmountValid = !Number.isNaN(parsedAmount) && parsedAmount >= 1
 
-  const totalRaised = Object.values(charityTotals).reduce((sum, amount) => sum + amount, 0)
+  const isCharityId = (value: string | null): value is CharityId =>
+    !!value && (["children", "animal", "water", "climate"] as const).includes(value as CharityId)
 
-  const getSelectedCharityName = () =>
-    CHARITIES.find((c) => c.id === selectedCharity)?.label ?? "Charity"
+  const getSelectedCharityName = () => {
+    const fromConfig = CHARITIES.find((c) => c.id === selectedCharity)?.label
+    const fromDb = leaderboard.find((c) => c.id === selectedCharity)?.name
+    return fromDb ?? fromConfig ?? "Charity"
+  }
+
+  const getCharityRaised = (id: CharityId) => {
+    const row = leaderboard.find((c) => c.id === id)
+    return row?.raised ?? 0
+  }
+
+  const totalRaised = leaderboard.reduce((sum, charity) => sum + (charity.raised ?? 0), 0)
+
+  const loadLeaderboard = useCallback(async () => {
+    if (!supabase) {
+      setLeaderboardError("Supabase is not configured.")
+      return
+    }
+
+    try {
+      setIsLoadingLeaderboard(true)
+      setLeaderboardError(null)
+
+      const { data, error } = await supabase
+        .from("charities")
+        .select("id, name, raised")
+        .order("raised", { ascending: false })
+
+      if (error) {
+        console.error("Error loading leaderboard:", error)
+        setLeaderboardError("Unable to load leaderboard.")
+        return
+      }
+
+      setLeaderboard(data ?? [])
+    } finally {
+      setIsLoadingLeaderboard(false)
+    }
+  }, [])
+
+  const incrementCharityRaised = useCallback(
+    async (charity: CharityId, amount: number) => {
+      if (!supabase) return
+
+      try {
+        const { data, error } = await supabase
+          .from("charities")
+          .select("raised")
+          .eq("id", charity)
+          .single()
+
+        if (error) {
+          console.error("Error fetching current raised amount:", error)
+          return
+        }
+
+        const current = data?.raised ?? 0
+
+        const { error: updateError } = await supabase
+          .from("charities")
+          .update({ raised: current + amount })
+          .eq("id", charity)
+
+        if (updateError) {
+          console.error("Error updating raised amount:", updateError)
+        }
+      } finally {
+        // Always try to refresh leaderboard after an attempted update
+        loadLeaderboard().catch((err) =>
+          console.error("Error refreshing leaderboard after update:", err),
+        )
+      }
+    },
+    [loadLeaderboard],
+  )
+
+  useEffect(() => {
+    let isMounted = true
+
+    const init = async () => {
+      if (!isMounted) return
+      await loadLeaderboard()
+    }
+
+    init()
+
+    const interval = setInterval(() => {
+      if (!isMounted) return
+      loadLeaderboard().catch((err) =>
+        console.error("Error refreshing leaderboard on interval:", err),
+      )
+    }, 10000)
+
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [loadLeaderboard])
 
   useEffect(() => {
     const success = searchParams.get("success")
     const amountParam = searchParams.get("amount")
-    const charityParam = searchParams.get("charity") as CharityId | null
+    const charityParam = searchParams.get("charity")
 
     if (success === "true" && amountParam) {
       const paidAmount = parseFloat(amountParam)
 
       if (!Number.isNaN(paidAmount) && paidAmount >= 1) {
-        const charity: CharityId =
-          charityParam && (["children", "animal", "water", "climate"] as const).includes(charityParam)
-            ? charityParam
-            : "children"
+        const charity: CharityId = isCharityId(charityParam) ? charityParam : "children"
 
         const numbers = Array.from({ length: 5 }, () => Math.floor(Math.random() * 99) + 1)
 
-        setCharityTotals((prev) => ({
-          ...prev,
-          [charity]: prev[charity] + paidAmount,
-        }))
+        // Update Supabase with the new raised amount
+        incrementCharityRaised(charity, paidAmount).catch((err) =>
+          console.error("Error incrementing charity raised amount:", err),
+        )
+
         setSelectedCharity(charity)
         setLuckyNumbers(numbers)
         setShowNumbers(true)
@@ -147,6 +246,7 @@ export default function LotteryLanding() {
           <div className="grid grid-cols-2 gap-3 md:gap-4">
             {CHARITIES.map((charity) => {
               const isActive = selectedCharity === charity.id
+              const raised = getCharityRaised(charity.id)
               return (
                 <button
                   key={charity.id}
@@ -168,9 +268,9 @@ export default function LotteryLanding() {
                       <span className="text-sm md:text-base font-semibold text-emerald-100">
                         {charity.label}
                       </span>
-                      {charityTotals[charity.id] > 0 && (
+                      {raised > 0 && (
                         <span className="text-[10px] md:text-xs font-mono text-emerald-300">
-                          ${charityTotals[charity.id].toFixed(2)}
+                          €{raised.toFixed(2)}
                         </span>
                       )}
                     </div>
@@ -246,7 +346,7 @@ export default function LotteryLanding() {
             Total Raised for Charity
           </div>
           <div className="text-5xl md:text-6xl font-bold font-mono text-primary text-glow-green tabular-nums">
-            ${totalRaised.toFixed(2)}
+            €{totalRaised.toFixed(2)}
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
@@ -264,18 +364,21 @@ export default function LotteryLanding() {
             </span>
           </div>
           <div className="space-y-3">
-            {CHARITIES.map((charity) => {
-              const value = charityTotals[charity.id] ?? 0
+            {leaderboard.map((charity) => {
+              const value = charity.raised ?? 0
               const percentage = totalRaised > 0 ? (value / totalRaised) * 100 : 0
+              const config = CHARITIES.find((c) => c.id === charity.id)
               return (
                 <div key={charity.id} className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span className="flex items-center gap-2">
-                      <span className="text-base">{charity.icon}</span>
-                      <span className="font-medium text-foreground/80">{charity.label}</span>
+                      <span className="text-base">{config?.icon ?? "✨"}</span>
+                      <span className="font-medium text-foreground/80">
+                        {charity.name ?? config?.label ?? "Charity"}
+                      </span>
                     </span>
                     <span className="font-mono text-emerald-400 text-xs">
-                      ${value.toFixed(2)}
+                      €{value.toFixed(2)}
                     </span>
                   </div>
                   <div className="h-2 w-full rounded-full bg-emerald-950/40 overflow-hidden border border-emerald-800/60">
